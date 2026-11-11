@@ -1,0 +1,16 @@
+{
+  "name": "llm-quality-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "report": "allure generate allure-results --clean -o allure-report && allure open allure-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "allure-playwright": "^3.0.9",
+    "allure-commandline": "^2.32.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

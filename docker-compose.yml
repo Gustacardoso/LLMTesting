@@ -1,0 +1,51 @@
+name: llm-quality-evaluator
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: llmquality
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d llmquality"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  evaluator:
+    build: ./evaluator
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      JUDGE_MODEL: ${JUDGE_MODEL:-gpt-4o-mini}
+    ports: ["8000:8000"]
+    profiles: ["full"]   # DeepEval + RAGAS sidecar (heavy image). Enable with: docker compose --profile full up
+
+  api:
+    build: ./backend
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      ConnectionStrings__Default: Host=db;Port=5432;Database=llmquality;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres}
+      Llm__OpenAiKey: ${OPENAI_API_KEY:-}
+      Llm__AnthropicKey: ${ANTHROPIC_API_KEY:-}
+      Llm__GeminiKey: ${GEMINI_API_KEY:-}
+      Llm__JudgeModel: ${JUDGE_MODEL:-gpt-4o-mini}
+      Llm__EvaluatorUrl: ${EVALUATOR_URL:-}
+      Cors__Origins__0: http://localhost:3000
+      OpenApi__Enabled: "true"
+    ports: ["8080:8080"]
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8080}
+    depends_on: [api]
+    ports: ["3000:3000"]
+
+volumes:
+  pgdata:

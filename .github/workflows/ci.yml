@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (xUnit + Testcontainers)
+    runs-on: ubuntu-latest   # Docker is preinstalled → Testcontainers works
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 9.0.x }
+      - run: dotnet restore backend/LlmQuality.slnx
+      - run: dotnet build backend/LlmQuality.slnx -c Release --no-restore -warnaserror
+      - name: Test with coverage
+        run: >
+          dotnet test backend/LlmQuality.slnx -c Release --no-build
+          --collect:"XPlat Code Coverage" --results-directory backend/TestResults
+      - name: Vulnerable NuGet packages (OWASP A06)
+        run: |
+          dotnet list backend/LlmQuality.slnx package --vulnerable --include-transitive | tee vuln.txt
+          ! grep -q "has the following vulnerable packages" vuln.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-results
+          path: |
+            backend/TestResults/**
+            backend/tests/LlmQuality.Tests/bin/Release/net9.0/allure-results/**
+
+  frontend:
+    name: Frontend (typecheck, lint, build, audit)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: frontend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+
+  e2e:
+    name: E2E (Playwright + Allure)
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start stack (offline mock LLM — deterministic, no secrets)
+        run: docker compose up -d --build --wait db api web
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: e2e/package-lock.json }
+      - working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test
+      - name: Allure report
+        if: always()
+        working-directory: e2e
+        run: npx allure generate allure-results --clean -o allure-report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-reports
+          path: |
+            e2e/allure-report
+            e2e/playwright-report
+            e2e/test-results
+      - name: DAST — OWASP ZAP baseline against the API
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: http://localhost:8080/openapi/v1.json
+          fail_action: false
+      - if: failure()
+        run: docker compose logs --no-color | tail -200
+
+  sonarqube:
+    name: SonarQube
+    runs-on: ubuntu-latest
+    needs: backend
+    if: ${{ vars.SONAR_HOST_URL != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 9.0.x }
+      - run: dotnet tool install --global dotnet-sonarscanner
+      - env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          dotnet sonarscanner begin /k:"llm-quality-evaluator" /d:sonar.host.url="${{ vars.SONAR_HOST_URL }}" /d:sonar.token="$SONAR_TOKEN" \
+            /d:sonar.cs.opencover.reportsPaths="backend/TestResults/**/coverage.opencover.xml" \
+            /d:sonar.qualitygate.wait=true
+          dotnet build backend/LlmQuality.slnx -c Release
+          dotnet test backend/LlmQuality.slnx -c Release --no-build --collect:"XPlat Code Coverage;Format=opencover" --results-directory backend/TestResults
+          dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
+
+  codeql:
+    name: CodeQL (SAST)
+    runs-on: ubuntu-latest
+    permissions: { security-events: write, contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with: { languages: "csharp, javascript-typescript" }
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+
+  docker:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t llmq-api backend
+      - run: docker build -t llmq-web frontend
+      - run: docker build -t llmq-evaluator evaluator

@@ -1,0 +1,16 @@
+.env
+bin/
+obj/
+node_modules/
+.next/
+out/
+allure-results/
+allure-report/
+playwright-report/
+test-results/
+TestResults/
+__pycache__/
+*.pyc
+.venv/
+.vs/
+.idea/
